@@ -8,10 +8,11 @@ echo "="*50
 cd /app/backend
 
 # Start dashboard in background
-echo "Starting dashboard on port 8001..."
+echo "Starting dashboard on port 8002..."
 python3 web_dashboard.py > dashboard.log 2>&1 &
 DASHBOARD_PID=$!
 echo "Dashboard PID: $DASHBOARD_PID"
+echo "Dashboard URL: http://localhost:8002"
 
 sleep 2
 
