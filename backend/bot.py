@@ -286,6 +286,9 @@ class TradingBot:
                 if time.time() - self.stats['last_heartbeat'] > config.HEARTBEAT_INTERVAL:
                     await self.send_heartbeat()
                 
+                # Save stats to file for dashboard
+                save_to_json(self.stats, 'bot_stats.json')
+                
                 # Wait before next iteration
                 await asyncio.sleep(10)  # Scan every 10 seconds
                 
