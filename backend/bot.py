@@ -83,7 +83,7 @@ class TradingBot:
                 'action': verification.get('action', 'skip'),
                 'reasons': verification.get('reasons', []),
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-            }\n            
+            }            
             # If valid, send notification
             if verification.get('valid') or verification.get('action') == 'notify':
                 self.stats['signals_valid'] += 1
