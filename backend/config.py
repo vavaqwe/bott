@@ -20,8 +20,8 @@ class Config:
     XT_BASE_URL = 'https://sapi.xt.com'
     
     # Blockchain RPC
-    ETH_RPC_URL = os.getenv('ETH_RPC_URL', 'https://rpc.ankr.com/eth')
-    BSC_RPC_URL = os.getenv('BSC_RPC_URL', 'https://rpc.ankr.com/bsc')
+    ETH_RPC_URL = os.getenv('ETH_RPC_URL', 'https://eth.llamarpc.com')
+    BSC_RPC_URL = os.getenv('BSC_RPC_URL', 'https://bsc-dataseed.binance.org')
     SOL_RPC_URL = os.getenv('SOL_RPC_URL', 'https://api.mainnet-beta.solana.com')
     
     # Trading settings
