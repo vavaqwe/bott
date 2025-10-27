@@ -11,8 +11,8 @@ class BlockchainClient:
     
     def __init__(self):
         self.chains = {}
-        self._initialize_chains()
         self.last_blocks = {}
+        self._initialize_chains()
         logger.info("Blockchain Client initialized")
     
     def _initialize_chains(self):
