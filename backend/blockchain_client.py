@@ -24,13 +24,38 @@ class BlockchainClient:
         
         for chain_name, rpc_url in chain_configs:
             try:
-                w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 30}))
-                if w3.is_connected():
-                    self.chains[chain_name] = w3
-                    self.last_blocks[chain_name] = 0
-                    logger.info(f"Connected to {chain_name} at {rpc_url}")
-                else:
-                    logger.error(f"Failed to connect to {chain_name}")
+                # Configure provider with better timeout settings
+                provider = Web3.HTTPProvider(
+                    rpc_url,
+                    request_kwargs={
+                        'timeout': 60,
+                        'headers': {'Content-Type': 'application/json'}
+                    }
+                )
+                w3 = Web3(provider)
+                
+                # Test connection with retries
+                max_retries = 3
+                connected = False
+                for attempt in range(max_retries):
+                    try:
+                        if w3.is_connected():
+                            block_number = w3.eth.block_number
+                            self.chains[chain_name] = w3
+                            self.last_blocks[chain_name] = block_number - 1
+                            logger.info(f"Connected to {chain_name} at {rpc_url[:50]}... (block: {block_number})")
+                            connected = True
+                            break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Connection attempt {attempt + 1} failed for {chain_name}: {e}")
+                            time.sleep(2)
+                        else:
+                            logger.error(f"Failed to connect to {chain_name} after {max_retries} attempts")
+                
+                if not connected:
+                    logger.error(f"Could not establish connection to {chain_name}")
+                    
             except Exception as e:
                 logger.error(f"Error initializing {chain_name}: {e}")
     
