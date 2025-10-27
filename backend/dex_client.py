@@ -42,6 +42,7 @@ class DexClient:
                 # Return the first pair with best liquidity
                 pairs = sorted(data['pairs'], key=lambda x: float(x.get('liquidity', {}).get('usd', 0)), reverse=True)
                 logger.info(f"Found {len(pairs)} pairs for {address[:8]}... on {chain}")
+                # Return just the first/best pair as a dict, not list
                 return pairs[0] if pairs else None
             else:
                 logger.warning(f"No pairs found for {address}")
