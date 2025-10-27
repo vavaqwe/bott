@@ -165,19 +165,62 @@ class TradingBot:
             
             logger.info(f"Scanning {len(pairs)} DEX pairs...")
             
+            if not pairs:
+                logger.warning("No pairs found from DEXScreener, trying alternative method...")
+                # Try to get some specific token pairs
+                await self._scan_specific_tokens()
+                return
+            
             # Process pairs
             tasks = []
-            for pair in pairs[:50]:  # Limit to 50 pairs per scan to avoid rate limits
-                pair_data = self.dex_client.extract_pair_data(pair)
-                if pair_data:
+            for pair in pairs[:30]:  # Limit to 30 pairs per scan to avoid rate limits
+                # Check if pair is already dict or needs extraction
+                if isinstance(pair, dict):
+                    # Check if it's already extracted
+                    if 'base_token' in pair:
+                        pair_data = pair
+                    else:
+                        pair_data = self.dex_client.extract_pair_data(pair)
+                else:
+                    continue
+                    
+                if pair_data and pair_data.get('base_token'):
                     tasks.append(self.process_dex_pair(pair_data))
             
             # Process in batches to avoid overwhelming APIs
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                successful = sum(1 for r in results if r and not isinstance(r, Exception))
+                logger.info(f"Processed {successful} pairs successfully")
         
         except Exception as e:
             logger.error(f"Error scanning DEX pairs: {e}")
+    
+    async def _scan_specific_tokens(self):
+        """Scan specific popular tokens as fallback"""
+        try:
+            # Popular token addresses on Ethereum
+            popular_tokens = {
+                'ethereum': [
+                    '0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE',  # SHIB
+                    '0x6982508145454Ce325dDbE47a25d4ec3d2311933',  # PEPE
+                ]
+            }
+            
+            for chain, addresses in popular_tokens.items():
+                for address in addresses:
+                    try:
+                        pair_info = self.dex_client.get_token_info(chain, address)
+                        if pair_info:
+                            pair_data = self.dex_client.extract_pair_data(pair_info)
+                            if pair_data:
+                                await self.process_dex_pair(pair_data)
+                        await asyncio.sleep(2)  # Rate limiting
+                    except Exception as e:
+                        logger.error(f"Error scanning token {address}: {e}")
+                        continue
+        except Exception as e:
+            logger.error(f"Error in specific token scanning: {e}")
     
     async def monitor_blockchains(self):
         """Monitor blockchain for new swap events"""
