@@ -59,6 +59,12 @@ class TradingBot:
             # Get XT ticker
             xt_ticker = self.xt_client.get_ticker(xt_symbol)
             
+            # If no XT ticker, skip (token not listed)
+            if not xt_ticker:
+                logger.debug(f"Token {token_symbol} not available on XT, skipping")
+                self.stats['signals_processed'] += 1
+                return False
+            
             # Verify signal
             verification = self.signal_verification.verify_signal(pair_data, xt_ticker)
             
@@ -77,11 +83,11 @@ class TradingBot:
                 'action': verification.get('action', 'skip'),
                 'reasons': verification.get('reasons', []),
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-            }
-            
+            }\n            
             # If valid, send notification
             if verification.get('valid') or verification.get('action') == 'notify':
                 self.stats['signals_valid'] += 1
+                logger.info(f"✓ Valid signal: {token_symbol} - Spread: {verification.get('spread', 0):.2f}%")
                 await self.telegram.send_signal_notification(signal_data)
                 
                 # Execute trade if conditions are met
