@@ -21,7 +21,7 @@ class TradingBot:
         self.xt_client = XTClient()
         self.signal_verification = SignalVerification()
         self.telegram = TelegramAdmin()
-        
+
         self.running = False
         self.start_time = time.time()
         self.stats = {
@@ -29,12 +29,17 @@ class TradingBot:
             'signals_valid': 0,
             'trades_executed': 0,
             'last_heartbeat': time.time(),
+            'last_signal_time': 0,
+            'errors_count': 0,
         }
-        
+
         # Load previous state
         self.positions = load_from_json('positions.json') or {}
         self.trades = load_from_json('trades.json') or []
-        
+
+        # Register Telegram commands
+        self._register_commands()
+
         logger.info("Trading Bot initialized")
     
     async def process_dex_pair(self, pair_data: Dict) -> bool:
@@ -166,39 +171,51 @@ class TradingBot:
     async def scan_dex_pairs(self):
         """Scan DEX for new pairs and opportunities"""
         try:
-            # Get latest pairs from DEXScreener
-            pairs = self.dex_client.get_latest_pairs()
-            
+            # Use async version to fetch from multiple chains simultaneously
+            pairs = await self.dex_client.get_latest_pairs_async()
+
+            if not pairs or len(pairs) == 0:
+                # Fallback to sync method
+                pairs = self.dex_client.get_latest_pairs()
+
             logger.info(f"Scanning {len(pairs)} DEX pairs...")
-            
+
             if not pairs:
                 logger.warning("No pairs found from DEXScreener, trying alternative method...")
                 # Try to get some specific token pairs
                 await self._scan_specific_tokens()
                 return
-            
-            # Process pairs
-            tasks = []
-            for pair in pairs[:30]:  # Limit to 30 pairs per scan to avoid rate limits
-                # Check if pair is already dict or needs extraction
-                if isinstance(pair, dict):
-                    # Check if it's already extracted
-                    if 'base_token' in pair:
-                        pair_data = pair
+
+            # Process pairs in batches to avoid rate limits
+            batch_size = 20
+            for i in range(0, len(pairs), batch_size):
+                batch = pairs[i:i+batch_size]
+                tasks = []
+
+                for pair in batch:
+                    # Check if pair is already dict or needs extraction
+                    if isinstance(pair, dict):
+                        # Check if it's already extracted
+                        if 'base_token' in pair:
+                            pair_data = pair
+                        else:
+                            pair_data = self.dex_client.extract_pair_data(pair)
                     else:
-                        pair_data = self.dex_client.extract_pair_data(pair)
-                else:
-                    continue
-                    
-                if pair_data and pair_data.get('base_token'):
-                    tasks.append(self.process_dex_pair(pair_data))
-            
-            # Process in batches to avoid overwhelming APIs
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                successful = sum(1 for r in results if r and not isinstance(r, Exception))
-                logger.info(f"Processed {successful} pairs successfully")
-        
+                        continue
+
+                    if pair_data and pair_data.get('base_token'):
+                        tasks.append(self.process_dex_pair(pair_data))
+
+                # Process batch
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    successful = sum(1 for r in results if r and not isinstance(r, Exception))
+                    logger.info(f"Batch {i//batch_size + 1}: Processed {successful}/{len(tasks)} pairs successfully")
+
+                # Small delay between batches
+                if i + batch_size < len(pairs):
+                    await asyncio.sleep(1)
+
         except Exception as e:
             logger.error(f"Error scanning DEX pairs: {e}")
     
@@ -246,12 +263,158 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error monitoring blockchains: {e}")
     
+    def _register_commands(self):
+        """Register Telegram bot commands"""
+        self.telegram.register_command('/start', self._cmd_start)
+        self.telegram.register_command('/status', self._cmd_status)
+        self.telegram.register_command('/balance', self._cmd_balance)
+        self.telegram.register_command('/stats', self._cmd_stats)
+        self.telegram.register_command('/settings', self._cmd_settings)
+        self.telegram.register_command('/stop', self._cmd_stop)
+        self.telegram.register_command('/help', self._cmd_help)
+        # Callback handlers for buttons
+        self.telegram.register_command('toggle_trading', self._callback_toggle_trading)
+        self.telegram.register_command('show_balance', self._callback_show_balance)
+
+    async def _cmd_start(self, message: Dict):
+        """Handle /start command"""
+        welcome_msg = (
+            "🚀 <b>Welcome to Trinkenbot Enhanced!</b>\n\n"
+            "I'm your automated DEX arbitrage trading bot.\n\n"
+            "<b>Commands:</b>\n"
+            "/status - Bot status\n"
+            "/balance - Account balance\n"
+            "/stats - Trading statistics\n"
+            "/settings - Bot settings\n"
+            "/help - Show help\n\n"
+            "Bot is monitoring DEX markets for arbitrage opportunities on XT.com!"
+        )
+        keyboard = {
+            'inline_keyboard': [
+                [{'text': '📊 Status', 'callback_data': '/status'},
+                 {'text': '💰 Balance', 'callback_data': 'show_balance'}],
+                [{'text': '⚙️ Settings', 'callback_data': '/settings'}]
+            ]
+        }
+        await self.telegram.send_message(welcome_msg, reply_markup=keyboard)
+
+    async def _cmd_status(self, message: Dict):
+        """Handle /status command"""
+        uptime = time.time() - self.start_time
+        uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
+
+        status_msg = (
+            "🟢 <b>Bot Status</b>\n\n"
+            f"<b>Status:</b> {'Running' if self.running else 'Stopped'}\n"
+            f"<b>Uptime:</b> {uptime_str}\n"
+            f"<b>Live Trading:</b> {'ON' if config.ALLOW_LIVE_TRADING else 'OFF'}\n\n"
+            f"<b>Signals Processed:</b> {self.stats['signals_processed']}\n"
+            f"<b>Valid Signals:</b> {self.stats['signals_valid']}\n"
+            f"<b>Trades Executed:</b> {self.stats['trades_executed']}\n"
+            f"<b>Errors:</b> {self.stats['errors_count']}"
+        )
+        await self.telegram.send_message(status_msg)
+
+    async def _cmd_balance(self, message: Dict):
+        """Handle /balance command"""
+        try:
+            balance = self.xt_client.get_balance()
+            if balance:
+                assets = balance.get('assets', [])
+                msg = "💰 <b>Account Balance</b>\n\n"
+                for asset in assets[:10]:  # Show top 10
+                    free = float(asset.get('free', 0))
+                    if free > 0:
+                        msg += f"<b>{asset.get('asset', 'N/A')}:</b> {free:.4f}\n"
+            else:
+                msg = "⚠️ Failed to fetch balance"
+        except Exception as e:
+            msg = f"⚠️ Error: {str(e)}"
+        await self.telegram.send_message(msg)
+
+    async def _cmd_stats(self, message: Dict):
+        """Handle /stats command"""
+        trades_count = len(self.trades)
+        positions_count = len(self.positions)
+
+        msg = (
+            "📊 <b>Trading Statistics</b>\n\n"
+            f"<b>Total Trades:</b> {trades_count}\n"
+            f"<b>Open Positions:</b> {positions_count}\n"
+            f"<b>Signals Processed:</b> {self.stats['signals_processed']}\n"
+            f"<b>Valid Signals:</b> {self.stats['signals_valid']}\n"
+        )
+
+        if trades_count > 0:
+            recent_trades = self.trades[-5:]
+            msg += "\n<b>Recent Trades:</b>\n"
+            for trade in recent_trades:
+                symbol = trade.get('symbol', 'N/A')
+                side = trade.get('side', 'N/A')
+                qty = trade.get('quantity', 0)
+                msg += f"• {symbol} {side} {qty}\n"
+
+        await self.telegram.send_message(msg)
+
+    async def _cmd_settings(self, message: Dict):
+        """Handle /settings command"""
+        msg = (
+            "⚙️ <b>Bot Settings</b>\n\n"
+            f"<b>Live Trading:</b> {'ON' if config.ALLOW_LIVE_TRADING else 'OFF'}\n"
+            f"<b>Min Spread:</b> {config.MIN_SPREAD_PERCENT}%\n"
+            f"<b>Max Spread:</b> {config.MAX_SPREAD_PERCENT}%\n"
+            f"<b>Min Liquidity:</b> ${config.MIN_LIQUIDITY_USD:,.0f}\n"
+            f"<b>Min Volume 24h:</b> ${config.MIN_VOLUME_24H_USD:,.0f}\n"
+        )
+        keyboard = {
+            'inline_keyboard': [
+                [{'text': f"{'Disable' if config.ALLOW_LIVE_TRADING else 'Enable'} Trading",
+                  'callback_data': 'toggle_trading'}]
+            ]
+        }
+        await self.telegram.send_message(msg, reply_markup=keyboard)
+
+    async def _cmd_stop(self, message: Dict):
+        """Handle /stop command"""
+        self.running = False
+        await self.telegram.send_message("🛑 Bot is stopping...")
+
+    async def _cmd_help(self, message: Dict):
+        """Handle /help command"""
+        help_msg = (
+            "📚 <b>Help - Trinkenbot Enhanced</b>\n\n"
+            "<b>Available Commands:</b>\n"
+            "/start - Initialize bot\n"
+            "/status - Show bot status\n"
+            "/balance - View account balance\n"
+            "/stats - Trading statistics\n"
+            "/settings - View/change settings\n"
+            "/stop - Stop the bot\n"
+            "/help - Show this help\n\n"
+            "<b>About:</b>\n"
+            "This bot monitors DEX markets and executes arbitrage trades on XT.com when profitable opportunities are found.\n\n"
+            f"<b>Current Settings:</b>\n"
+            f"• Spread: {config.MIN_SPREAD_PERCENT}%-{config.MAX_SPREAD_PERCENT}%\n"
+            f"• Min Liquidity: ${config.MIN_LIQUIDITY_USD:,.0f}"
+        )
+        await self.telegram.send_message(help_msg)
+
+    async def _callback_toggle_trading(self, callback: Dict):
+        """Handle toggle trading button"""
+        config.ALLOW_LIVE_TRADING = not config.ALLOW_LIVE_TRADING
+        status = 'enabled' if config.ALLOW_LIVE_TRADING else 'disabled'
+        await self.telegram.send_message(f"✅ Live trading {status}")
+
+    async def _callback_show_balance(self, callback: Dict):
+        """Handle show balance button"""
+        await self._cmd_balance(callback)
+
     async def send_heartbeat(self):
         """Send periodic heartbeat"""
         try:
             uptime = time.time() - self.start_time
             uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
-            
+
             stats = {
                 'uptime': uptime_str,
                 'signals_processed': self.stats['signals_processed'],
@@ -259,10 +422,10 @@ class TradingBot:
                 'active_chains': list(self.blockchain_client.chains.keys()),
                 'last_block': max(self.blockchain_client.last_blocks.values()) if self.blockchain_client.last_blocks else 0,
             }
-            
+
             await self.telegram.send_heartbeat(stats)
             self.stats['last_heartbeat'] = time.time()
-            
+
         except Exception as e:
             logger.error(f"Error sending heartbeat: {e}")
     
@@ -270,32 +433,54 @@ class TradingBot:
         """Main bot loop"""
         logger.info("Starting main bot loop...")
         self.running = True
-        
+
+        # Start Telegram polling
+        self.telegram.start_polling()
+
         # Send startup message
-        await self.telegram.send_message("🚀 <b>Trading Bot Started</b>\n\nMonitoring DEX and blockchain for arbitrage opportunities...")
-        
+        startup_msg = (
+            "🚀 <b>Trading Bot Started</b>\n\n"
+            "Monitoring DEX for arbitrage opportunities...\n\n"
+            f"<b>Settings:</b>\n"
+            f"• Spread: {config.MIN_SPREAD_PERCENT}%-{config.MAX_SPREAD_PERCENT}%\n"
+            f"• Min Liquidity: ${config.MIN_LIQUIDITY_USD:,.0f}\n"
+            f"• Live Trading: {'ON' if config.ALLOW_LIVE_TRADING else 'OFF'}"
+        )
+        await self.telegram.send_message(startup_msg)
+
+        scan_interval = 5  # Scan every 5 seconds for more signals
+
         while self.running:
             try:
                 # Scan DEX pairs
                 await self.scan_dex_pairs()
-                
+
                 # Monitor blockchains (optional, can be heavy)
                 # await self.monitor_blockchains()
-                
+
                 # Send heartbeat if needed
                 if time.time() - self.stats['last_heartbeat'] > config.HEARTBEAT_INTERVAL:
                     await self.send_heartbeat()
-                
+
                 # Save stats to file for dashboard
                 save_to_json(self.stats, 'bot_stats.json')
-                
+
                 # Wait before next iteration
-                await asyncio.sleep(10)  # Scan every 10 seconds
-                
+                await asyncio.sleep(scan_interval)
+
+            except KeyboardInterrupt:
+                logger.info("Stopping bot...")
+                self.running = False
+                break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
+                self.stats['errors_count'] += 1
                 await self.telegram.send_error_notification(f"Main loop error: {str(e)}")
                 await asyncio.sleep(30)  # Wait longer on error
+
+        # Cleanup
+        self.telegram.stop_polling()
+        await self.telegram.send_message("🛑 <b>Bot Stopped</b>")
     
     def start(self):
         """Start the bot"""

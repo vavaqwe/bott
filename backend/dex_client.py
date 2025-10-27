@@ -1,4 +1,6 @@
 import requests
+import asyncio
+import aiohttp
 from typing import Optional, Dict, List
 from utils import setup_logging, retry_on_failure, measure_latency
 from config import config
@@ -8,7 +10,7 @@ logger = setup_logging(__name__)
 
 class DexClient:
     """Client for DEXScreener API"""
-    
+
     def __init__(self):
         self.base_url = config.DEXSCREENER_BASE_URL
         self.session = requests.Session()
@@ -16,7 +18,8 @@ class DexClient:
             'Accept': 'application/json'
         })
         self.last_request_time = 0
-        self.rate_limit_delay = 1.0  # 1 second between requests
+        self.rate_limit_delay = 0.5  # 0.5 second between requests for faster scanning
+        self.chains = ['ethereum', 'bsc', 'polygon', 'arbitrum', 'base', 'solana']
         logger.info("DEX Client initialized")
     
     def _rate_limit(self):
@@ -75,48 +78,162 @@ class DexClient:
     def get_latest_pairs(self) -> List[Dict]:
         """Get latest token pairs across all chains"""
         try:
-            self._rate_limit()
-            # Use correct endpoint for latest boosted tokens
-            url = f"https://api.dexscreener.com/token-boosts/latest/v1"
-            response = self.session.get(url, timeout=15)
-            
-            if response.status_code == 404:
-                # Fallback to search for popular tokens
-                logger.warning("Latest pairs endpoint not available, using search fallback")
-                return self._get_trending_pairs()
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # Extract pairs from boosted tokens
-            pairs = []
-            if isinstance(data, list):
-                for item in data:
-                    if 'tokenAddress' in item:
-                        # Get token info for each boosted token
-                        token_pairs = self.get_token_info('ethereum', item['tokenAddress'])
-                        if token_pairs:
-                            pairs.append(token_pairs)
-            
-            logger.info(f"Fetched {len(pairs)} latest pairs")
-            return pairs[:50]  # Limit to 50
+            # Use multiple strategies to get more signals
+            all_pairs = []
+
+            # Strategy 1: Get pairs from multiple chains
+            for chain in ['ethereum', 'bsc', 'polygon']:
+                try:
+                    chain_pairs = self._get_chain_latest_pairs(chain)
+                    all_pairs.extend(chain_pairs)
+                except Exception as e:
+                    logger.error(f"Error getting pairs from {chain}: {e}")
+
+            # Strategy 2: Get trending pairs
+            trending = self._get_trending_pairs()
+            all_pairs.extend(trending)
+
+            # Remove duplicates based on pair_address
+            seen = set()
+            unique_pairs = []
+            for pair in all_pairs:
+                pair_addr = pair.get('pairAddress', '')
+                if pair_addr and pair_addr not in seen:
+                    seen.add(pair_addr)
+                    unique_pairs.append(pair)
+
+            logger.info(f"Fetched {len(unique_pairs)} unique latest pairs")
+            return unique_pairs[:100]  # Increased limit to 100
         except Exception as e:
             logger.error(f"Failed to get latest pairs: {e}")
             return self._get_trending_pairs()
+
+    def _get_chain_latest_pairs(self, chain: str) -> List[Dict]:
+        """Get latest pairs from specific chain"""
+        try:
+            # Use search endpoint with popular tokens for each chain
+            popular_tokens = {
+                'ethereum': ['PEPE', 'SHIB', 'WOJAK'],
+                'bsc': ['CAKE', 'BABY', 'SAFEMOON'],
+                'polygon': ['MATIC', 'QUICK', 'GHST']
+            }
+
+            chain_tokens = popular_tokens.get(chain, ['ETH'])
+            all_pairs = []
+
+            for token in chain_tokens:
+                try:
+                    self._rate_limit()
+                    pairs = self.search_pairs(f"{token}")
+                    if pairs:
+                        # Filter to only this chain
+                        filtered = [p for p in pairs if p.get('chainId', '').lower() == chain.lower()]
+                        all_pairs.extend(filtered[:5])
+                except Exception as e:
+                    logger.debug(f"Error searching {token} on {chain}: {e}")
+                    continue
+
+            logger.info(f"Got {len(all_pairs)} pairs from {chain}")
+            return all_pairs[:20]
+        except Exception as e:
+            logger.error(f"Error getting {chain} pairs: {e}")
+            return []
     
     def _get_trending_pairs(self) -> List[Dict]:
         """Fallback method to get trending pairs"""
         try:
-            # Search for popular tokens as fallback
-            popular_tokens = ['PEPE', 'SHIB', 'DOGE', 'FLOKI', 'WOJAK']
+            # Search for popular and trending tokens
+            popular_tokens = [
+                'PEPE', 'SHIB', 'DOGE', 'FLOKI', 'WOJAK',
+                'BONK', 'WIF', 'MEME', 'TRUMP', 'PEPE2',
+                'AIDOGE', 'TURBO', 'LADYS', 'CHAD', 'SMOL'
+            ]
             pairs = []
             for token in popular_tokens:
-                search_results = self.search_pairs(token)
-                if search_results:
-                    pairs.extend(search_results[:5])
-            return pairs[:30]
+                try:
+                    search_results = self.search_pairs(token)
+                    if search_results:
+                        # Sort by liquidity and volume
+                        sorted_results = sorted(
+                            search_results,
+                            key=lambda x: float(x.get('liquidity', {}).get('usd', 0)) + float(x.get('volume', {}).get('h24', 0)),
+                            reverse=True
+                        )
+                        pairs.extend(sorted_results[:3])
+                except Exception as e:
+                    logger.error(f"Error searching {token}: {e}")
+                    continue
+            return pairs[:50]
         except Exception as e:
             logger.error(f"Failed to get trending pairs: {e}")
+            return []
+
+    async def get_latest_pairs_async(self) -> List[Dict]:
+        """Async version to get pairs from multiple sources simultaneously"""
+        try:
+            tasks = []
+
+            # Create tasks for each chain
+            for chain in ['ethereum', 'bsc', 'polygon', 'base']:
+                tasks.append(self._fetch_chain_pairs_async(chain))
+
+            # Fetch all in parallel
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            all_pairs = []
+            for result in results:
+                if isinstance(result, list):
+                    all_pairs.extend(result)
+
+            # Remove duplicates
+            seen = set()
+            unique_pairs = []
+            for pair in all_pairs:
+                pair_addr = pair.get('pairAddress', '')
+                if pair_addr and pair_addr not in seen:
+                    seen.add(pair_addr)
+                    unique_pairs.append(pair)
+
+            logger.info(f"Async fetched {len(unique_pairs)} unique pairs")
+            return unique_pairs[:100]
+        except Exception as e:
+            logger.error(f"Error in async fetch: {e}")
+            return []
+
+    async def _fetch_chain_pairs_async(self, chain: str) -> List[Dict]:
+        """Async fetch pairs from chain"""
+        try:
+            # Use search API for popular tokens
+            popular_tokens = {
+                'ethereum': ['PEPE', 'SHIB'],
+                'bsc': ['CAKE', 'BABY'],
+                'polygon': ['MATIC'],
+                'base': ['BRETT', 'DEGEN']
+            }
+
+            chain_tokens = popular_tokens.get(chain, ['ETH'])
+            all_pairs = []
+
+            async with aiohttp.ClientSession() as session:
+                for token in chain_tokens:
+                    try:
+                        url = f"https://api.dexscreener.com/latest/dex/search"
+                        params = {'q': token}
+                        async with session.get(url, params=params, timeout=10) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                pairs = data.get('pairs', [])
+                                # Filter to this chain
+                                filtered = [p for p in pairs if p.get('chainId', '').lower() == chain.lower()]
+                                all_pairs.extend(filtered[:5])
+                        await asyncio.sleep(0.5)  # Rate limiting
+                    except Exception as e:
+                        logger.debug(f"Error fetching {token} on {chain}: {e}")
+                        continue
+
+            return all_pairs[:25]
+        except Exception as e:
+            logger.error(f"Error fetching {chain} async: {e}")
             return []
     
     def extract_pair_data(self, pair: Dict) -> Dict:

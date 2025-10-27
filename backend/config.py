@@ -14,9 +14,9 @@ class Config:
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
     
-    # XT Exchange
-    XT_API_KEY = os.getenv('XT_API_KEY')
-    XT_API_SECRET = os.getenv('XT_API_SECRET')
+    # XT Exchange - Account 2 (with balance)
+    XT_API_KEY = os.getenv('XT_ACCOUNT_2_API_KEY') or os.getenv('XT_API_KEY')
+    XT_API_SECRET = os.getenv('XT_ACCOUNT_2_API_SECRET') or os.getenv('XT_API_SECRET')
     XT_BASE_URL = 'https://sapi.xt.com'
     
     # Blockchain RPC

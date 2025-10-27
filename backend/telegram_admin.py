@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
-from typing import Optional
+import threading
+from typing import Optional, Dict, Callable
 from utils import setup_logging
 from config import config
 
@@ -8,14 +9,18 @@ logger = setup_logging(__name__)
 
 class TelegramAdmin:
     """Telegram bot for notifications and admin commands"""
-    
+
     def __init__(self):
         self.bot_token = config.TELEGRAM_BOT_TOKEN
         self.chat_id = config.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.offset = 0
+        self.command_handlers = {}
+        self.running = False
+        self.polling_thread = None
         logger.info("Telegram Admin initialized")
     
-    async def send_message(self, text: str, parse_mode: str = 'HTML') -> bool:
+    async def send_message(self, text: str, parse_mode: str = 'HTML', reply_markup: Optional[Dict] = None) -> bool:
         """Send message to Telegram chat"""
         try:
             async with aiohttp.ClientSession() as session:
@@ -26,6 +31,9 @@ class TelegramAdmin:
                     'parse_mode': parse_mode,
                     'disable_web_page_preview': True
                 }
+                if reply_markup:
+                    payload['reply_markup'] = reply_markup
+
                 async with session.post(url, json=payload, timeout=10) as response:
                     if response.status == 200:
                         logger.debug(f"Message sent to Telegram")
@@ -122,3 +130,106 @@ class TelegramAdmin:
             await self.send_message(message)
         except Exception as e:
             logger.error(f"Error sending error notification: {e}")
+
+    def register_command(self, command: str, handler: Callable):
+        """Register a command handler"""
+        self.command_handlers[command] = handler
+        logger.info(f"Registered command: {command}")
+
+    async def get_updates(self) -> list:
+        """Get updates from Telegram"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/getUpdates"
+                params = {
+                    'offset': self.offset,
+                    'timeout': 30,
+                    'allowed_updates': ['message', 'callback_query']
+                }
+                async with session.get(url, params=params, timeout=35) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get('ok'):
+                            return data.get('result', [])
+                    return []
+        except Exception as e:
+            logger.error(f"Error getting updates: {e}")
+            return []
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = None):
+        """Answer callback query from inline button"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/answerCallbackQuery"
+                payload = {'callback_query_id': callback_query_id}
+                if text:
+                    payload['text'] = text
+                async with session.post(url, json=payload, timeout=10) as response:
+                    return response.status == 200
+        except Exception as e:
+            logger.error(f"Error answering callback query: {e}")
+            return False
+
+    async def process_updates(self):
+        """Process incoming updates"""
+        updates = await self.get_updates()
+
+        for update in updates:
+            try:
+                self.offset = update['update_id'] + 1
+
+                # Handle callback queries (button presses)
+                if 'callback_query' in update:
+                    callback = update['callback_query']
+                    data = callback.get('data', '')
+                    callback_id = callback['id']
+
+                    # Answer callback to remove loading state
+                    await self.answer_callback_query(callback_id)
+
+                    # Handle callback
+                    if data in self.command_handlers:
+                        await self.command_handlers[data](callback)
+
+                # Handle text messages
+                elif 'message' in update:
+                    message = update['message']
+                    text = message.get('text', '')
+
+                    if text.startswith('/'):
+                        command = text.split()[0]
+                        if command in self.command_handlers:
+                            await self.command_handlers[command](message)
+
+            except Exception as e:
+                logger.error(f"Error processing update: {e}")
+
+    def start_polling(self):
+        """Start polling for updates in background thread"""
+        if self.running:
+            logger.warning("Polling already running")
+            return
+
+        self.running = True
+        self.polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
+        self.polling_thread.start()
+        logger.info("Started Telegram polling")
+
+    def _polling_loop(self):
+        """Background polling loop"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        while self.running:
+            try:
+                loop.run_until_complete(self.process_updates())
+            except Exception as e:
+                logger.error(f"Error in polling loop: {e}")
+                asyncio.sleep(5)
+
+    def stop_polling(self):
+        """Stop polling"""
+        self.running = False
+        if self.polling_thread:
+            self.polling_thread.join(timeout=5)
+        logger.info("Stopped Telegram polling")

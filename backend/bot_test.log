@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/tmp/cc-agent/59290273/project/backend/main.py", line 14, in <module>
+    from bot import TradingBot
+  File "/tmp/cc-agent/59290273/project/backend/bot.py", line 8, in <module>
+    from dex_client import DexClient
+  File "/tmp/cc-agent/59290273/project/backend/dex_client.py", line 127
+    pairs = self.search_pairs(f\"{token}\")
+                                ^
+SyntaxError: unexpected character after line continuation character

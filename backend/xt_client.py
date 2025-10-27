@@ -63,11 +63,23 @@ class XTClient:
             response = self.session.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
-            
+
             if data.get('rc') == 0:
                 result = data.get('result', {})
-                logger.debug(f"Ticker for {symbol}: {result}")
-                return result
+                # Handle if result is a list, take first element
+                if isinstance(result, list):
+                    if len(result) > 0:
+                        logger.debug(f"Ticker for {symbol}: {result[0]}")
+                        return result[0]
+                    else:
+                        logger.warning(f"Empty result list for {symbol}")
+                        return None
+                elif isinstance(result, dict):
+                    logger.debug(f"Ticker for {symbol}: {result}")
+                    return result
+                else:
+                    logger.warning(f"Unexpected result type for {symbol}: {type(result)}")
+                    return None
             else:
                 logger.warning(f"Failed to get ticker for {symbol}: {data}")
                 return None
